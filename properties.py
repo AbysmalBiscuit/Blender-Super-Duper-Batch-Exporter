@@ -103,14 +103,24 @@ class BatchExportSettings(PropertyGroup):
         name="Mode",
         description="What to export",
         items=[
-            ("OBJECTS", "Objects", "Each object is exported separately", 1),
+            (
+                "OBJECTS",
+                "Objects",
+                "Each object is exported separately",
+                1,
+            ),
             (
                 "PARENT_OBJECTS",
                 "Parent Objects",
                 "Same as 'Objects', but objects that are parents have their\nchildren exported along with them",
                 2,
             ),
-            ("COLLECTIONS", "Collections", "Each collection is exported into its own file", 3),
+            (
+                "COLLECTIONS",
+                "Collections",
+                "Each collection is exported into its own file",
+                3,
+            ),
             (
                 "COLLECTION_SUBDIRECTORIES",
                 "Collection Sub-Directories",
@@ -144,6 +154,10 @@ class BatchExportSettings(PropertyGroup):
     merge_all: BoolProperty(
         name="Merge All",
         description="It to colaps and aply all the modifier in order, merge all the mesh that do not have in there name -colonly all the mesh that have -colonly shold be merge togeter (even if there are in a sub folder), the end result shold be two mesh.",
+    )
+    no_sub_dirs: BoolProperty(
+        name="No Sub-Directories",
+        description="No sub-directories will be created",
     )
     prefix_collection: BoolProperty(
         name="Prefix Collection Name",

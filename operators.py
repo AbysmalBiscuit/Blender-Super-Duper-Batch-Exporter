@@ -199,9 +199,12 @@ class EXPORT_MESH_OT_batch(Operator):
 
                 # 3. Handle Directory Creation
                 if root_name != "Scene Collection":
-                    collection_dir = os.path.join(
-                        base_dir, root_name
-                    )  # Always use root name for dir
+                    if settings.no_sub_dirs:
+                        collection_dir = base_dir
+                    else:
+                        collection_dir = os.path.join(
+                            base_dir, root_name
+                        )  # Always use root name for dir
                     if not os.path.exists(collection_dir):
                         try:
                             os.makedirs(collection_dir)

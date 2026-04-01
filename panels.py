@@ -65,6 +65,7 @@ def draw_settings(self, context):
     col.prop(settings, "mode")
     col.prop(settings, "limit")
     col.prop(settings, "merge_all")
+    col.prop(settings, "no_sub_dirs")
     if "OBJECT" in settings.mode:
         col.prop(settings, "prefix_collection")
     if "SUBDIR" in settings.mode:
