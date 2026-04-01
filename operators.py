@@ -1,30 +1,77 @@
+import os
+import shutil
+from pathlib import Path
 
 import bpy
-import os
-from pathlib import Path
-import shutil
-
 from bpy.types import Operator
+
 from . import utils
 
 
 # Operator called when pressing the batch export button.
 class EXPORT_MESH_OT_batch(Operator):
-    """Export many objects to seperate files all at once"""
+    """Export many objects to separate files all at once."""
+
     bl_idname = "export_mesh.batch"
     bl_label = "Batch Export"
     file_count = 0
     copy_count = 0
 
+    def process_and_merge(self, context, objects, root_name):
+        """Collapses modifiers and merges into two objects: Standard and Collision."""
+        temp_objects = []
+
+        # 1. Duplicate objects so we don't destroy the original scene
+        for obj in objects:
+            if obj.type != "MESH":
+                continue
+            new_obj = obj.copy()
+            new_obj.data = obj.data.copy()
+            context.collection.objects.link(new_obj)
+            temp_objects.append(new_obj)
+
+        # 2. Collapse Modifiers
+        for obj in temp_objects:
+            context.view_layer.objects.active = obj
+            # Apply all modifiers
+            for mod in obj.modifiers:
+                bpy.ops.object.modifier_apply(modifier=mod.name)
+
+        # 3. Separate into groups
+        standard_objs = [o for o in temp_objects if "-colonly" not in o.name]
+        collision_objs = [o for o in temp_objects if "-colonly" in o.name]
+
+        final_pair = []
+
+        # 4. Merge Groups
+        for group, suffix in [(standard_objs, ""), (collision_objs, "-colonly")]:
+            if not group:
+                continue
+
+            # Select the group
+            bpy.ops.object.select_all(action="DESELECT")
+            for o in group:
+                o.select_set(True)
+
+            context.view_layer.objects.active = group[0]
+            bpy.ops.object.join()
+
+            # Rename the merged result
+            merged_obj = context.view_layer.objects.active
+            merged_obj.name = f"{root_name}{suffix}"
+            final_pair.append(merged_obj)
+
+        return final_pair
+
     def execute(self, context):
         settings = context.scene.batch_export
 
-# 1. Get Project Directory from Preferences
+        # 1. Get Project Directory from Preferences
         name = __package__
         pref_project_dir = ""
         if name in context.preferences.addons:
             prefs = context.preferences.addons[name].preferences
-            if prefs and hasattr(prefs, 'project_dir'):
+            if prefs and hasattr(prefs, "project_dir"):
                 pref_project_dir = prefs.project_dir
 
         # 2. Calculate Base Directory
@@ -32,51 +79,50 @@ class EXPORT_MESH_OT_batch(Operator):
             # If Project Dir is set, it overrides the .blend file as the relative root
             raw_dir = settings.directory
             # Strip Blender's relative prefix '//' if present so it doesn't conflict
-            if raw_dir.startswith('//'):
-                 raw_dir = raw_dir[2:]
-            
-            # Combine Project Dir with Output Dir. 
+            if raw_dir.startswith("//"):
+                raw_dir = raw_dir[2:]
+
+            # Combine Project Dir with Output Dir.
             # If Output Dir is absolute (e.g. "C:\"), it will correctly override the join.
             base_dir = os.path.join(bpy.path.abspath(pref_project_dir), raw_dir)
             base_dir = os.path.normpath(base_dir)
-            
+
         else:
             # Standard Blender behavior (relative to .blend file)
             base_dir = settings.directory
-            if not bpy.data.is_saved:
-                # If unsaved, we cannot use relative paths starting with //
-                if base_dir.startswith("//"):
-                    self.report(
-                        {'ERROR'}, "Save .blend file before exporting to relative directory\n(or set a Project Directory in Preferences)")
-                    return {'FINISHED'}
+            # If unsaved, we cannot use relative paths starting with //
+            if not bpy.data.is_saved and base_dir.startswith("//"):
+                self.report(
+                    {"ERROR"},
+                    "Save .blend file before exporting to relative directory\n(or set a Project Directory in Preferences)",
+                )
+                return {"FINISHED"}
             base_dir = bpy.path.abspath(base_dir)
 
         # 3. Validate existence
         if not os.path.isdir(base_dir):
             msg = f"Export directory doesn't exist:\n{base_dir}"
-            self.report({'ERROR'}, msg)
-            print(msg) # Print to console for easier debugging of paths
-            return {'FINISHED'}
+            self.report({"ERROR"}, msg)
+            print(msg)  # Print to console for easier debugging of paths
+            return {"FINISHED"}
 
         self.file_count = 0
 
         # Save current state of viewlayer, selection and active object to restore after export
         view_layer = context.view_layer
         selection = context.selected_objects
-        obj_active = view_layer.objects.active   
+        obj_active = view_layer.objects.active
 
         # Check if we're not in Object mode and set if needed
-        obj_active = view_layer.objects.active        
-        mode = ''
+        obj_active = view_layer.objects.active
+        mode = ""
         if obj_active:
             mode = obj_active.mode
-            bpy.ops.object.mode_set(mode='OBJECT')  # Only works in Object mode
-        
+            bpy.ops.object.mode_set(mode="OBJECT")  # Only works in Object mode
 
         ##### EXPORT OBJECTS BASED ON MODES #####
-        if settings.mode == 'OBJECTS':
+        if settings.mode == "OBJECTS":
             for obj in self.get_filtered_objects(context, settings):
-
                 # Export Selection
                 obj.select_set(True)
                 self.export_selection(obj.name, context, base_dir)
@@ -84,16 +130,19 @@ class EXPORT_MESH_OT_batch(Operator):
                 # Deselect Obj
                 obj.select_set(False)
 
-        elif settings.mode == 'PARENT_OBJECTS':
-            exportObjects = self.get_filtered_objects(context, settings)
+        elif settings.mode == "PARENT_OBJECTS":
+            export_objects = self.get_filtered_objects(context, settings)
 
-            for obj in exportObjects:
-                if obj.parent in exportObjects:
+            for obj in export_objects:
+                if obj.parent in export_objects:
                     continue  # if it has a parent, skip it for now, it'll be exported when we get to its parent
 
                 # Export Selection
                 obj.select_set(True)
-                self.select_children_recursive(obj, context,)
+                self.select_children_recursive(
+                    obj,
+                    context,
+                )
 
                 if context.selected_objects:
                     self.export_selection(obj.name, context, base_dir)
@@ -102,13 +151,13 @@ class EXPORT_MESH_OT_batch(Operator):
                 for obj in context.selected_objects:
                     obj.select_set(False)
 
-        elif settings.mode == 'COLLECTIONS':
-            exportobjects = self.get_filtered_objects(context, settings)
+        elif settings.mode == "COLLECTIONS":
+            export_objects = self.get_filtered_objects(context, settings)
 
             for col in bpy.data.collections.values():
                 # Check if collection objects are in filtered objects
                 for obj in col.objects:
-                    if not obj in exportobjects:
+                    if obj not in export_objects:
                         continue
                     obj.select_set(True)
                 if context.selected_objects:
@@ -119,58 +168,94 @@ class EXPORT_MESH_OT_batch(Operator):
                     obj.select_set(False)
 
         # Functionality for both COLLECTION_SUBDIRECTORIES and COLLECTION_SUBDIR_PARENTS
-        elif 'COLLECTION_SUBDIR' in settings.mode:
-            exportobjects = self.get_filtered_objects(context, settings)
+        elif "COLLECTION_SUBDIR" in settings.mode:
+            export_objects = self.get_filtered_objects(context, settings)
+            processed_roots = set()
 
-            for obj in exportobjects:
-                if 'PARENT' in settings.mode and obj.parent in exportobjects:
-                    continue  # if it has a parent, skip it for now, it'll be exported when we get to its parent
+            for obj in export_objects:
+                # 1. Skip if already processed via a parent (for non-merge mode)
+                if (
+                    not settings.merge_all
+                    and "PARENT" in settings.mode
+                    and obj.parent in export_objects
+                ):
+                    continue
 
-                # Modify base_dir to add collection, creating directory if necessary
-                sCollection = obj.users_collection[0].name
-                if sCollection != "Scene Collection":
-                    if settings.full_hierarchy:
-                        hierarchy = utils.get_collection_hierarchy(sCollection)
-                        collection_dir = os.path.join(base_dir, hierarchy)
-                    else:
-                        collection_dir = os.path.join(base_dir, sCollection)
+                # 2. Find the Root Collection (the top-most under Scene Collection)
+                root_col = obj.users_collection[0]
 
-                    # create sub-directory if it doesn't exist
+                # Check if this collection is already at the top level
+                all_root_collections = [c.name for c in context.scene.collection.children]
+
+                if root_col.name not in all_root_collections:
+                    # If it's not a root, find which root collection contains it
+                    for top_col in context.scene.collection.children:
+                        # Recursively check if our collection is a child of this top_col
+                        if root_col.name in [c.name for c in top_col.children_recursive]:
+                            root_col = top_col
+                            break
+
+                root_name = root_col.name
+
+                # 3. Handle Directory Creation
+                if root_name != "Scene Collection":
+                    collection_dir = os.path.join(
+                        base_dir, root_name
+                    )  # Always use root name for dir
                     if not os.path.exists(collection_dir):
                         try:
                             os.makedirs(collection_dir)
-                            print(f"Directory created: {collection_dir}")
                         except OSError as e:
-                            self.report({'ERROR'}, f"Error creating directory {collection_dir}: {e}")
-                else: # If object is just in Scene Collection it get's exported to base_dir
+                            self.report({"ERROR"}, f"Directory error: {e}")
+                else:
                     collection_dir = base_dir
 
-                # Select
-                obj.select_set(True)
-                if 'PARENT' in settings.mode:
-                    self.select_children_recursive(obj, context)
+                # 4. MERGE ALL Mode Logic
+                if settings.merge_all:
+                    if root_name in processed_roots:
+                        continue
 
-                # Export
-                self.export_selection(obj.name, context, collection_dir)
+                    # Gather all meshes belonging to this root hierarchy
+                    all_in_root = [
+                        o
+                        for o in export_objects
+                        if any(
+                            c.name == root_name
+                            or root_name in [p.name for p in c.children_recursive]
+                            for c in o.users_collection
+                        )
+                    ]
 
-                # Deselect
-                for obj in context.selected_objects:
-                    obj.select_set(False)
+                    # Process, Merge, and Rename (calls the helper function provided earlier)
+                    merged_pair = self.process_and_merge(context, all_in_root, root_name)
 
-        elif settings.mode == 'SCENE':
-            prefix = settings.prefix
-            suffix = settings.suffix
-            
-            filename = ''
-            if not prefix and not suffix:
-                filename = bpy.path.basename(bpy.context.blend_data.filepath).split('.')[0]
-            
-            for obj in self.get_filtered_objects(context, settings):
-                obj.select_set(True)
-            self.export_selection(filename, context, base_dir)
+                    if merged_pair:
+                        bpy.ops.object.select_all(action="DESELECT")
+                        for m_obj in merged_pair:
+                            m_obj.select_set(True)
+
+                        # Export the merged pair (Standard and Collision)
+                        self.export_selection(root_name, context, collection_dir)
+
+                        # Cleanup temp data
+                        for m_obj in merged_pair:
+                            bpy.data.objects.remove(m_obj, do_unlink=True)
+
+                    processed_roots.add(root_name)
+
+                # 5. STANDARD Mode Logic (Your original code)
+                else:
+                    obj.select_set(True)
+                    if "PARENT" in settings.mode:
+                        self.select_children_recursive(obj, context)
+
+                    self.export_selection(obj.name, context, collection_dir)
+
+                    for o in context.selected_objects:
+                        o.select_set(False)
 
         # Return selection to how it was
-        bpy.ops.object.select_all(action='DESELECT')
+        bpy.ops.object.select_all(action="DESELECT")
         for obj in selection:
             obj.select_set(True)
         view_layer.objects.active = obj_active
@@ -184,43 +269,44 @@ class EXPORT_MESH_OT_batch(Operator):
         name = __package__
         if name in context.preferences.addons:
             prefs = context.preferences.addons[name].preferences
-            if prefs and hasattr(prefs, 'copy_on_export'):
+            if prefs and hasattr(prefs, "copy_on_export"):
                 copies = prefs.copy_on_export
 
         if self.file_count == 0:
-            self.report({'ERROR'}, "NOTHING TO EXPORT")
+            self.report({"ERROR"}, "NOTHING TO EXPORT")
         elif copies and settings.copy_on_export:
-            self.report({'INFO'}, f"Exported {self.file_count} file(s),\nMade {self.copy_count} copies")
+            self.report(
+                {"INFO"}, f"Exported {self.file_count} file(s),\nMade {self.copy_count} copies"
+            )
         elif self.file_count:
-            self.report({'INFO'}, f"Exported {self.file_count} file(s)")
+            self.report({"INFO"}, f"Exported {self.file_count} file(s)")
 
-        return {'FINISHED'}
+        return {"FINISHED"}
 
     # Finds all renderable objects and returns a list of them
     def get_renderable_objects(self):
-        """
-        Recursively collect hidden objects from scene collections.
-        
+        """Recursively collect hidden objects from scene collections.
+
         Returns:
             list: A list of objects hidden in viewport or render
         """
         renderable_objects = []
-        
+
         def check_collection(collection):
             # Skip if collection is None
             if not collection:
                 return
-            
+
             # Skip if the entire collection is hidden in render
             if collection.hide_render:
                 return
-            
+
             # Check objects in this collection
             for obj in collection.objects:
                 # Check both viewport and render visibility
                 if not obj.hide_render:
                     renderable_objects.append(obj)
-            
+
             # Recursively check child collections
             while collection.children:
                 for child_collection in collection.children:
@@ -228,38 +314,42 @@ class EXPORT_MESH_OT_batch(Operator):
                     if not child_collection.hide_render:
                         check_collection(child_collection)
                 break  # Use break to match the while loop structure
-        
+
         # Start the recursive check from the scene's root collection
         check_collection(bpy.context.scene.collection)
-        
+
         return renderable_objects
 
     # Deselect and Get Objects to Export by Limit Settings
     def get_filtered_objects(self, context, settings):
         objects = context.view_layer.objects.values()
-        if settings.limit == 'VISIBLE':
+        if settings.limit == "VISIBLE":
             filtered_objects = []
             for obj in objects:
                 obj.select_set(False)
                 if obj.visible_get() and obj.type in settings.object_types:
                     filtered_objects.append(obj)
             return filtered_objects
-        if settings.limit == 'SELECTED':
+
+        if settings.limit == "SELECTED":
             selection = context.selected_objects
             filtered_objects = []
             for obj in objects:
                 obj.select_set(False)
-                if obj in selection:
-                    if obj.type in settings.object_types:
-                        filtered_objects.append(obj)
+                if obj in selection and obj.type in settings.object_types:
+                    filtered_objects.append(obj)
             return filtered_objects
-        if settings.limit == 'RENDERABLE':
+
+        if settings.limit == "RENDERABLE":
             filtered_objects = []
             for obj in objects:
                 obj.select_set(False)
-                if obj.visible_get() and obj.type in settings.object_types:
-                    if obj in self.get_renderable_objects():
-                        filtered_objects.append(obj)
+                if (
+                    obj.visible_get()
+                    and obj.type in settings.object_types
+                    and obj in self.get_renderable_objects()
+                ):
+                    filtered_objects.append(obj)
             return filtered_objects
         return objects
 
@@ -269,19 +359,18 @@ class EXPORT_MESH_OT_batch(Operator):
                 c.select_set(True)
             self.select_children_recursive(c, context)
 
-    def export_selection(self, itemname, context, base_dir):
+    def export_selection(self, item_name, context, base_dir):
         settings = context.scene.batch_export
         # save the transform to be reset later:
         old_locations = []
         old_rotations = []
         old_scales = []
-        
-        # Extra objects for LOD export store for later removal
-        preLodObjects = []
-        lodObjects = []
 
-        objectsloop = context.selected_objects
-        for obj in objectsloop:
+        # Extra objects for LOD export store for later removal
+        pre_lod_objects = []
+        lod_objects = []
+
+        for obj in context.selected_objects:
             # Save Old Locations
             old_locations.append(obj.location.copy())
             old_rotations.append(obj.rotation_euler.copy())
@@ -290,92 +379,91 @@ class EXPORT_MESH_OT_batch(Operator):
             # If exporting by parent, don't set child (object that has a parent) transform
             if "PARENT" in settings.mode and obj.parent in context.selected_objects:
                 continue
-            else:
-                if settings.set_location:
-                    obj.location = settings.location
-                if settings.set_rotation:
-                    obj.rotation_euler = settings.rotation
-                if settings.set_scale:
-                    obj.scale = settings.scale
 
-            # Change Itemname If Collection As Prefix
-            if settings.prefix_collection and 'OBJECT' in settings.mode:
+            if settings.set_location:
+                obj.location = settings.location
+            if settings.set_rotation:
+                obj.rotation_euler = settings.rotation
+            if settings.set_scale:
+                obj.scale = settings.scale
+
+            # Change item_name If Collection As Prefix
+            if settings.prefix_collection and "OBJECT" in settings.mode:
                 collection_name = obj.users_collection[0].name
-                if not collection_name == 'Scene Collection':
-                    itemname = "_".join([collection_name, itemname])
+                if collection_name != "Scene Collection":
+                    item_name = f"{collection_name}_{item_name}"
 
             # LOD Creation
-            if settings.create_lod and settings.file_format == 'FBX' and obj.type == 'MESH':
+            if settings.create_lod and settings.file_format == "FBX" and obj.type == "MESH":
                 # Save obj info and backup
-                obj_CollectionObjs = obj.users_collection[0].objects
+                obj_collection_objs = obj.users_collection[0].objects
                 name = obj.name
-                obj.name = name + '_preLOD'
-                preLodObjects.append(obj)
+                obj.name = name + "_preLOD"
+                pre_lod_objects.append(obj)
                 obj.select_set(False)
 
                 # Setup LOD parent object
                 lodParent = bpy.data.objects.new("Empty_Name", None)
-                obj_CollectionObjs.link(lodParent)
+                obj_collection_objs.link(lodParent)
                 lodParent.location = obj.location
                 lodParent.rotation_quaternion = obj.rotation_quaternion
                 lodParent.name = name
                 lodParent["fbx_type"] = "LodGroup"
                 if obj.parent:
                     lodParent.parent = obj.parent
-                lodObjects.append(lodParent)
+                lod_objects.append(lodParent)
                 lodParent.select_set(True)
 
                 # Create LOD0 copy
                 lod0 = obj.copy()
-                lod0.data = lod0.data.copy() # linked = false
+                lod0.data = lod0.data.copy()  # linked = false
                 lod0.name = name + f"_LOD0"
                 lod0.parent = lodParent
-                lod0.location = (0,0,0)
-                obj_CollectionObjs.link(lod0)
-                lodObjects.append(lod0)
+                lod0.location = (0, 0, 0)
+                obj_collection_objs.link(lod0)
+                lod_objects.append(lod0)
                 lod0.select_set(True)
 
                 # Loop over and create each LOD object
-                for lodcount in range(settings.lod_count):
+                for lod_count in range(settings.lod_count):
                     lod = lod0.copy()
-                    lod.data = lod.data.copy() # linked = false
-                    lod.name = name + f"_LOD{lodcount+1}"
+                    lod.data = lod.data.copy()  # linked = false
+                    lod.name = name + f"_LOD{lod_count + 1}"
                     lod.parent = lodParent
-                    obj_CollectionObjs.link(lod)
-                    lodObjects.append(lod)
+                    obj_collection_objs.link(lod)
+                    lod_objects.append(lod)
                     lod.select_set(True)
 
                     # Decimation
-                    decimate_mod = lod.modifiers.new('lodding', type='DECIMATE')
-                    ratio_attr_name = f"lod{lodcount+1}_ratio"
+                    decimate_mod = lod.modifiers.new("lodding", type="DECIMATE")
+                    ratio_attr_name = f"lod{lod_count + 1}_ratio"
                     decimate_mod.ratio = getattr(settings, ratio_attr_name)
-                    
-                    #bpy.ops.object.modifier_apply(modifier=decimate_mod.name)
+
+                    # bpy.ops.object.modifier_apply(modifier=decimate_mod.name)
                 settings.apply_mods = True
                 # THIS DOESNT WORK settings.object_types.EMPTY = True
 
         # Final File Name
         prefix = settings.prefix
         # Check Prefix for Subdirectories
-        prefixroot = os.path.dirname( os.path.join(base_dir, prefix) )
-        if not os.path.exists(prefixroot):
+        prefix_root = os.path.dirname(os.path.join(base_dir, prefix))
+        if not os.path.exists(prefix_root):
             try:
-                os.makedirs(prefixroot)
-                print(f"Directory created: {prefixroot}")
+                os.makedirs(prefix_root)
+                print(f"Directory created: {prefix_root}")
             except OSError as e:
-                self.report({'ERROR'}, f"Error creating directory {prefixroot}: {e}")
+                self.report({"ERROR"}, f"Error creating directory {prefix_root}: {e}")
         suffix = settings.suffix
-        name = prefix + bpy.path.clean_name(itemname) + suffix
+        name = prefix + bpy.path.clean_name(item_name) + suffix
         fp = os.path.join(base_dir, name)
         extension = None
-        
+
         # Export
 
         if settings.file_format == "ABC":
-            extension = '.abc'
-            options = utils.load_operator_preset(
-                'wm.alembic_export', settings.abc_preset)
-            options["filepath"] = fp+extension
+            extension = ".abc"
+            options = utils.load_operator_preset("wm.alembic_export", settings.abc_preset)
+            options["filepath"] = fp + extension
             options["selected"] = True
             options["start"] = settings.frame_start
             options["end"] = settings.frame_end
@@ -385,67 +473,68 @@ class EXPORT_MESH_OT_batch(Operator):
             # operator rather than INVOKE it it runs in the foreground. Here I change the
             # execution context to EXEC_REGION_WIN.
             # docs.blender.org/api/current/bpy.ops.html?highlight=exec_default#execution-context
-            bpy.ops.wm.alembic_export('EXEC_REGION_WIN', **options)
+            bpy.ops.wm.alembic_export("EXEC_REGION_WIN", **options)
 
         elif settings.file_format == "USD":
             extension = settings.usd_format
-            options = utils.load_operator_preset(
-                'wm.usd_export', settings.usd_preset)
-            options["filepath"] = fp+extension
+            options = utils.load_operator_preset("wm.usd_export", settings.usd_preset)
+            options["filepath"] = fp + extension
             options["selected_objects_only"] = True
             bpy.ops.wm.usd_export(**options)
 
         elif settings.file_format == "SVG":
-            extension = '.svg'
-            bpy.ops.wm.gpencil_export_svg(
-                filepath=fp+extension, selected_object_type='SELECTED')
+            extension = ".svg"
+            bpy.ops.wm.gpencil_export_svg(filepath=fp + extension, selected_object_type="SELECTED")
 
         elif settings.file_format == "PDF":
-            extension = '.pdf'
-            bpy.ops.wm.gpencil_export_pdf(
-                filepath=fp+extension, selected_object_type='SELECTED')
+            extension = ".pdf"
+            bpy.ops.wm.gpencil_export_pdf(filepath=fp + extension, selected_object_type="SELECTED")
 
         elif settings.file_format == "OBJ":
-            extension = '.obj'
-            options = utils.load_operator_preset(
-                'wm.obj_export', settings.obj_preset)
-            options["filepath"] = fp+extension
+            extension = ".obj"
+            options = utils.load_operator_preset("wm.obj_export", settings.obj_preset)
+            options["filepath"] = fp + extension
             options["export_selected_objects"] = True
             options["apply_modifiers"] = settings.apply_mods
             bpy.ops.wm.obj_export(**options)
 
         elif settings.file_format == "PLY":
-            extension = '.ply'
+            extension = ".ply"
             bpy.ops.wm.ply_export(
-                filepath=fp+extension, ascii_format=settings.ply_ascii, export_selected_objects=True, apply_modifiers=settings.apply_mods)
+                filepath=fp + extension,
+                ascii_format=settings.ply_ascii,
+                export_selected_objects=True,
+                apply_modifiers=settings.apply_mods,
+            )
 
         elif settings.file_format == "STL":
-            extension = '.stl'
+            extension = ".stl"
             bpy.ops.wm.stl_export(
-                filepath=fp+extension, ascii_format=settings.stl_ascii, export_selected_objects=True, apply_modifiers=settings.apply_mods)
+                filepath=fp + extension,
+                ascii_format=settings.stl_ascii,
+                export_selected_objects=True,
+                apply_modifiers=settings.apply_mods,
+            )
 
         elif settings.file_format == "FBX":
-            extension = '.fbx'
-            options = utils.load_operator_preset(
-                'export_scene.fbx', settings.fbx_preset)
-            options["filepath"] = fp+extension
+            extension = ".fbx"
+            options = utils.load_operator_preset("export_scene.fbx", settings.fbx_preset)
+            options["filepath"] = fp + extension
             options["use_selection"] = True
             options["use_mesh_modifiers"] = settings.apply_mods
             bpy.ops.export_scene.fbx(**options)
 
             # LOD De-Creation
             if settings.create_lod:
-                for lod in lodObjects:
+                for lod in lod_objects:
                     bpy.data.objects.remove(lod, do_unlink=True)
-                for obj in preLodObjects:
-                    if '_preLOD' in obj.name:
+                for obj in pre_lod_objects:
+                    if "_preLOD" in obj.name:
                         obj.name = obj.name[0:-7]
-                        
 
         elif settings.file_format == "glTF":
-            extension = '.glb'
-            options = utils.load_operator_preset(
-                'export_scene.gltf', settings.gltf_preset)
+            extension = ".glb"
+            options = utils.load_operator_preset("export_scene.gltf", settings.gltf_preset)
             options["filepath"] = fp
             options["use_selection"] = True
             options["export_apply"] = settings.apply_mods
@@ -468,21 +557,22 @@ class EXPORT_MESH_OT_batch(Operator):
         name = __package__
         if name in context.preferences.addons:
             prefs = context.preferences.addons[name].preferences
-            if prefs and hasattr(prefs, 'copy_on_export'):
+            if prefs and hasattr(prefs, "copy_on_export"):
                 copies = prefs.copy_on_export
 
         if copies and settings.copy_on_export:
-            exportfile = Path(fp).with_suffix(extension)
-            if exportfile.exists():
-                oldroot = Path(bpy.path.abspath(settings.directory))
-                newroot = Path(bpy.path.abspath(settings.copy_directory))
-                if not oldroot.resolve() == newroot.resolve():
-                    subpath = exportfile.relative_to(oldroot)
-                    copyfile = newroot / subpath
+            export_file = Path(fp).with_suffix(extension)
+            if export_file.exists():
+                old_root = Path(bpy.path.abspath(settings.directory))
+                new_root = Path(bpy.path.abspath(settings.copy_directory))
+                if not old_root.resolve() == new_root.resolve():
+                    subpath = export_file.relative_to(old_root)
+                    copyfile = new_root / subpath
 
-                    shutil.copy(exportfile, copyfile)
-                    print('made this copy:   ', copyfile.resolve())
+                    shutil.copy(export_file, copyfile)
+                    print("made this copy:   ", copyfile.resolve())
                     self.copy_count += 1
+
 
 '''
 ##########################################################################################################
@@ -1095,3 +1185,4 @@ class EXPORT_MESH_OT_batch(Operator):
 registry = [
     EXPORT_MESH_OT_batch,
 ]
+

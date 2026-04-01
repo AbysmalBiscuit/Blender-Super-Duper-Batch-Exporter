@@ -12,17 +12,18 @@ bl_info = {
     "warning": "Relies on the export add-on for the format used being enabled",
     "doc_url": "https://github.com/bastianlstrube/Blender-Super-Duper-Batch-Exporter",
 }
-from bpy.types import Scene, TOPBAR_MT_editor_menus, VIEW3D_MT_editor_menus
-from bpy.props import PointerProperty
-from bpy.utils import register_class, unregister_class, previews
 import importlib
 import os
+
+from bpy.props import PointerProperty
+from bpy.types import Scene, TOPBAR_MT_editor_menus, VIEW3D_MT_editor_menus
+from bpy.utils import previews, register_class, unregister_class
 
 module_names = [
     "preferences",
     "properties",
     "panels",
-    "operators", 
+    "operators",
 ]
 
 
@@ -32,17 +33,14 @@ def register_unregister_modules(module_names: list, register: bool):
     registerable classes.
     """
     register_func = register_class if register else unregister_class
-    un = 'un' if not register else ''
+    un = "un" if not register else ""
 
-    modules = [
-    __import__(__package__ + "." + submod, {}, {}, submod)
-    for submod in module_names
-    ]
+    modules = [__import__(__package__ + "." + submod, {}, {}, submod) for submod in module_names]
 
     for m in modules:
         if register:
             importlib.reload(m)
-        if hasattr(m, 'registry'):
+        if hasattr(m, "registry"):
             for c in m.registry:
                 try:
                     register_func(c)
@@ -52,16 +50,18 @@ def register_unregister_modules(module_names: list, register: bool):
                     )
                     print(e)
 
-        if hasattr(m, 'modules'):
+        if hasattr(m, "modules"):
             register_unregister_modules(m.modules, register)
 
-        if register and hasattr(m, 'register'):
+        if register and hasattr(m, "register"):
             m.register()
-        elif hasattr(m, 'unregister'):
+        elif hasattr(m, "unregister"):
             m.unregister()
+
 
 # icon dict to store.... something in
 preview_collections = {}
+
 
 def register():
     # icon registration
@@ -69,14 +69,16 @@ def register():
     pcoll = previews.new()
     custom_icons = pcoll
     icons_dir = os.path.join(os.path.dirname(__file__), "icons")
-    pcoll.load("batchexport_icon", os.path.join(icons_dir, "SuperDuperBatchExporter_Icon.png"), 'IMAGE')
+    pcoll.load(
+        "batchexport_icon", os.path.join(icons_dir, "SuperDuperBatchExporter_Icon.png"), "IMAGE"
+    )
     preview_collections["main"] = pcoll
 
     register_unregister_modules(module_names, True)
 
     # Add batch export settings to Scene type
     Scene.batch_export = PointerProperty(type=properties.BatchExportSettings)
-    
+
     # Always append the draw_popover function to menus
     TOPBAR_MT_editor_menus.append(panels.draw_popover)
     VIEW3D_MT_editor_menus.append(panels.draw_popover)
@@ -88,7 +90,7 @@ def unregister():
     for pcoll in preview_collections.values():
         previews.remove(pcoll)
     preview_collections.clear()
-    custom_icons = None # Good practice to clear the global reference
+    custom_icons = None  # Good practice to clear the global reference
 
     register_unregister_modules(reversed(module_names), False)
 
@@ -97,10 +99,12 @@ def unregister():
     VIEW3D_MT_editor_menus.remove(panels.draw_popover)
 
     # Remove properties
-    #del bpy.types.Scene.batch_export  # THIS SHOULD BE ADDED AS A BUTTON IN THE PREFERENCES INSTEAD
+    # del bpy.types.Scene.batch_export  # THIS SHOULD BE ADDED AS A BUTTON IN THE PREFERENCES INSTEAD
+
 
 def get_icon_id(icon_name):
     """Helper function to get icon ID"""
     if "main" in preview_collections and icon_name in preview_collections["main"]:
         return preview_collections["main"][icon_name].icon_id
     return 0
+
