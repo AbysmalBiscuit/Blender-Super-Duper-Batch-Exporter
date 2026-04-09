@@ -30,12 +30,23 @@ class EXPORT_MESH_OT_batch(Operator):
             context.collection.objects.link(new_obj)
             temp_objects.append(new_obj)
 
-        # 2. Collapse Modifiers
+        # 2. Collapse Modifiers & Normalize Data
         for obj in temp_objects:
             context.view_layer.objects.active = obj
-            # Apply all modifiers
-            for mod in obj.modifiers:
-                bpy.ops.object.modifier_apply(modifier=mod.name)
+            obj.select_set(True)
+
+            # 1. Apply all modifiers FIRST to preserve their intended look
+            for mod in list(obj.modifiers):
+                try:
+                    bpy.ops.object.modifier_apply(modifier=mod.name)
+                except Exception as e:
+                    self.report({"WARNING"}, f"Could not apply {mod.name} on {obj.name}: {e}")
+
+            # 2. Apply Transform SECOND to prep for the 'Join' operation
+            # This fixes the flipped normals caused by negative scales
+            bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
+
+            obj.select_set(False)
 
         # 3. Separate into groups
         standard_objs = [o for o in temp_objects if "-colonly" not in o.name]
@@ -48,7 +59,6 @@ class EXPORT_MESH_OT_batch(Operator):
             if not group:
                 continue
 
-            # Select the group
             bpy.ops.object.select_all(action="DESELECT")
             for o in group:
                 o.select_set(True)
@@ -56,8 +66,26 @@ class EXPORT_MESH_OT_batch(Operator):
             context.view_layer.objects.active = group[0]
             bpy.ops.object.join()
 
-            # Rename the merged result
             merged_obj = context.view_layer.objects.active
+
+            # --- RECENTER LOGIC FOR MERGED ---
+            if context.scene.batch_export.recenter_all_objects:
+                merged_obj.location.x = 0
+                merged_obj.location.y = 0
+
+            # --- NEW: Recalculate Normals ---
+            # Switch to Edit Mode to perform mesh operations
+            bpy.ops.object.mode_set(mode="EDIT")
+            bpy.ops.mesh.select_all(action="SELECT")
+
+            # Recalculate Outside
+            bpy.ops.mesh.normals_make_consistent(inside=False)
+
+            # Return to Object Mode for renaming and further processing
+            bpy.ops.object.mode_set(mode="OBJECT")
+            # --------------------------------
+
+            # Rename the merged result
             merged_obj.name = f"{root_name}{suffix}"
             final_pair.append(merged_obj)
 
@@ -172,6 +200,9 @@ class EXPORT_MESH_OT_batch(Operator):
             export_objects = self.get_filtered_objects(context, settings)
             processed_roots = set()
 
+            # Cache top-level collection names
+            all_root_collections = [c.name for c in context.scene.collection.children]
+
             for obj in export_objects:
                 # 1. Skip if already processed via a parent (for non-merge mode)
                 if (
@@ -181,17 +212,17 @@ class EXPORT_MESH_OT_batch(Operator):
                 ):
                     continue
 
-                # 2. Find the Root Collection (the top-most under Scene Collection)
-                root_col = obj.users_collection[0]
+                # 2. Find the Root Collection
+                if not obj.users_collection:
+                    continue
 
-                # Check if this collection is already at the top level
-                all_root_collections = [c.name for c in context.scene.collection.children]
+                current_col = obj.users_collection[0]
+                root_col = current_col
 
-                if root_col.name not in all_root_collections:
-                    # If it's not a root, find which root collection contains it
+                # If the immediate collection isn't a root, find the root that owns it
+                if current_col.name not in all_root_collections:
                     for top_col in context.scene.collection.children:
-                        # Recursively check if our collection is a child of this top_col
-                        if root_col.name in [c.name for c in top_col.children_recursive]:
+                        if current_col.name in [c.name for c in top_col.children_recursive]:
                             root_col = top_col
                             break
 
@@ -202,9 +233,8 @@ class EXPORT_MESH_OT_batch(Operator):
                     if settings.no_sub_dirs:
                         collection_dir = base_dir
                     else:
-                        collection_dir = os.path.join(
-                            base_dir, root_name
-                        )  # Always use root name for dir
+                        collection_dir = os.path.join(base_dir, root_name)
+
                     if not os.path.exists(collection_dir):
                         try:
                             os.makedirs(collection_dir)
@@ -218,18 +248,18 @@ class EXPORT_MESH_OT_batch(Operator):
                     if root_name in processed_roots:
                         continue
 
-                    # Gather all meshes belonging to this root hierarchy
+                    # FIX: Gather all objects that belong to root_col OR any of its nested children
+                    valid_collections = {root_col.name} | {
+                        c.name for c in root_col.children_recursive
+                    }
+
                     all_in_root = [
                         o
                         for o in export_objects
-                        if any(
-                            c.name == root_name
-                            or root_name in [p.name for p in c.children_recursive]
-                            for c in o.users_collection
-                        )
+                        if any(c.name in valid_collections for c in o.users_collection)
                     ]
 
-                    # Process, Merge, and Rename (calls the helper function provided earlier)
+                    # Process, Merge, and Rename
                     merged_pair = self.process_and_merge(context, all_in_root, root_name)
 
                     if merged_pair:
@@ -237,16 +267,14 @@ class EXPORT_MESH_OT_batch(Operator):
                         for m_obj in merged_pair:
                             m_obj.select_set(True)
 
-                        # Export the merged pair (Standard and Collision)
                         self.export_selection(root_name, context, collection_dir)
 
-                        # Cleanup temp data
                         for m_obj in merged_pair:
                             bpy.data.objects.remove(m_obj, do_unlink=True)
 
                     processed_roots.add(root_name)
 
-                # 5. STANDARD Mode Logic (Your original code)
+                # 5. STANDARD Mode Logic
                 else:
                     obj.select_set(True)
                     if "PARENT" in settings.mode:
@@ -385,8 +413,16 @@ class EXPORT_MESH_OT_batch(Operator):
 
             if settings.set_location:
                 obj.location = settings.location
+
+            # --- RECENTER LOGIC FOR STANDARD EXPORT ---
+            # This happens after set_location so it overrides X/Y if recenter is on
+            if settings.recenter_all_objects:
+                obj.location.x = 0
+                obj.location.y = 0
+
             if settings.set_rotation:
                 obj.rotation_euler = settings.rotation
+
             if settings.set_scale:
                 obj.scale = settings.scale
 
@@ -1188,4 +1224,3 @@ class EXPORT_MESH_OT_batch(Operator):
 registry = [
     EXPORT_MESH_OT_batch,
 ]
-

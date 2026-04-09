@@ -159,6 +159,10 @@ class BatchExportSettings(PropertyGroup):
         name="No Sub-Directories",
         description="No sub-directories will be created",
     )
+    recenter_all_objects: BoolProperty(
+        name="Recenter All Objects",
+        description="Centers all objects along the X and Y axes",
+    )
     prefix_collection: BoolProperty(
         name="Prefix Collection Name",
         description="Adds the containing collection's name to the exported file's name, after the 'prefix'",
