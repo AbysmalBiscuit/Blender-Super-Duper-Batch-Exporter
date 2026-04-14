@@ -163,6 +163,10 @@ class BatchExportSettings(PropertyGroup):
         name="Recenter All Objects",
         description="Centers all objects along the X and Y axes",
     )
+    convert_curves_to_meshes: BoolProperty(
+        name="Convert Curves to Meshes",
+        description="Converts curve objects to meshes",
+    )
     prefix_collection: BoolProperty(
         name="Prefix Collection Name",
         description="Adds the containing collection's name to the exported file's name, after the 'prefix'",

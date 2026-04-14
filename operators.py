@@ -21,31 +21,40 @@ class EXPORT_MESH_OT_batch(Operator):
         """Collapses modifiers and merges into two objects: Standard and Collision."""
         temp_objects = []
 
-        # 1. Duplicate objects so we don't destroy the original scene
+        # 1. Duplicate & Convert to Mesh
         for obj in objects:
-            if obj.type != "MESH":
+            # Skip if not a mesh or curve
+            if obj.type not in ["MESH", "CURVE"]:
                 continue
+
             new_obj = obj.copy()
             new_obj.data = obj.data.copy()
             context.collection.objects.link(new_obj)
             temp_objects.append(new_obj)
 
+            # If it's a curve, convert the duplicate to a mesh immediately
+            if new_obj.type == "CURVE":
+                context.view_layer.objects.active = new_obj
+                bpy.ops.object.select_all(action="DESELECT")
+                new_obj.select_set(True)
+                bpy.ops.object.convert(target="MESH")
+                # Note: conversion replaces new_obj.data, so it's now a Mesh object
+
         # 2. Collapse Modifiers & Normalize Data
         for obj in temp_objects:
             context.view_layer.objects.active = obj
+            bpy.ops.object.select_all(action="DESELECT")
             obj.select_set(True)
 
-            # 1. Apply all modifiers FIRST to preserve their intended look
+            # Apply modifiers
             for mod in list(obj.modifiers):
                 try:
                     bpy.ops.object.modifier_apply(modifier=mod.name)
                 except Exception as e:
                     self.report({"WARNING"}, f"Could not apply {mod.name} on {obj.name}: {e}")
 
-            # 2. Apply Transform SECOND to prep for the 'Join' operation
-            # This fixes the flipped normals caused by negative scales
+            # Apply Transform
             bpy.ops.object.transform_apply(location=False, rotation=True, scale=True)
-
             obj.select_set(False)
 
         # 3. Separate into groups
@@ -64,28 +73,26 @@ class EXPORT_MESH_OT_batch(Operator):
                 o.select_set(True)
 
             context.view_layer.objects.active = group[0]
+
+            # Ensure we are in Object Mode for joining
+            bpy.ops.object.mode_set(mode="OBJECT")
             bpy.ops.object.join()
 
             merged_obj = context.view_layer.objects.active
 
-            # --- RECENTER LOGIC FOR MERGED ---
+            # --- Recenter Logic ---
             if context.scene.batch_export.recenter_all_objects:
                 merged_obj.location.x = 0
                 merged_obj.location.y = 0
 
-            # --- NEW: Recalculate Normals ---
-            # Switch to Edit Mode to perform mesh operations
-            bpy.ops.object.mode_set(mode="EDIT")
-            bpy.ops.mesh.select_all(action="SELECT")
+            # --- Recalculate Normals ---
+            # Double check it is a Mesh before entering Mesh Edit mode
+            if merged_obj.type == "MESH":
+                bpy.ops.object.mode_set(mode="EDIT")
+                bpy.ops.mesh.select_all(action="SELECT")
+                bpy.ops.mesh.normals_make_consistent(inside=False)
+                bpy.ops.object.mode_set(mode="OBJECT")
 
-            # Recalculate Outside
-            bpy.ops.mesh.normals_make_consistent(inside=False)
-
-            # Return to Object Mode for renaming and further processing
-            bpy.ops.object.mode_set(mode="OBJECT")
-            # --------------------------------
-
-            # Rename the merged result
             merged_obj.name = f"{root_name}{suffix}"
             final_pair.append(merged_obj)
 
@@ -93,6 +100,17 @@ class EXPORT_MESH_OT_batch(Operator):
 
     def execute(self, context):
         settings = context.scene.batch_export
+
+        if not settings.convert_curves_to_meshes:
+            formats_needing_conversion = {"glTF", "FBX", "OBJ", "PLY", "STL"}
+            if settings.file_format in formats_needing_conversion:
+                export_objects = self.get_filtered_objects(context, settings)
+                has_curves = any(obj.type == "CURVE" for obj in export_objects)
+                if has_curves:
+                    self.report(
+                        {"WARNING"},
+                        "Curve objects found but 'Convert Curves to Meshes' is disabled. Curves may not export correctly.",
+                    )
 
         # 1. Get Project Directory from Preferences
         name = __package__
@@ -392,6 +410,41 @@ class EXPORT_MESH_OT_batch(Operator):
 
     def export_selection(self, item_name, context, base_dir):
         settings = context.scene.batch_export
+        converted_objects = []
+
+        if settings.convert_curves_to_meshes:
+            original_curves = []
+            for obj in list(context.selected_objects):
+                if obj.type != "CURVE":
+                    continue
+
+                # 1. Duplicate the curve
+                dup = obj.copy()
+                dup.data = obj.data.copy()
+
+                # Link to the same collection as the original
+                if obj.users_collection:
+                    obj.users_collection[0].objects.link(dup)
+                else:
+                    context.scene.collection.objects.link(dup)
+
+                # 2. Make the duplicate active and select only it
+                bpy.ops.object.select_all(action="DESELECT")
+                context.view_layer.objects.active = dup
+                dup.select_set(True)
+
+                # 3. Convert to Mesh
+                bpy.ops.object.convert(target="MESH")
+
+                # 4. Track for cleanup and re-selection
+                obj.select_set(False)  # Deselect original
+                dup.name = f"{obj.name}_TEMP_MESH"
+                original_curves.append((obj, dup))
+
+            # Reselect all remaining non-curve objects + new meshes
+            for _, dup in original_curves:
+                dup.select_set(True)
+
         # save the transform to be reset later:
         old_locations = []
         old_rotations = []
@@ -574,11 +627,10 @@ class EXPORT_MESH_OT_batch(Operator):
         elif settings.file_format == "glTF":
             extension = ".glb"
             options = utils.load_operator_preset("export_scene.gltf", settings.gltf_preset)
-            options["filepath"] = fp
+            options["filepath"] = fp  # fp should not include the extension for glTF operator
             options["use_selection"] = True
             options["export_apply"] = settings.apply_mods
             bpy.ops.export_scene.gltf(**options)
-            print(options.keys())
 
         # Reset the transform to what it was before
         i = 0
@@ -611,6 +663,10 @@ class EXPORT_MESH_OT_batch(Operator):
                     shutil.copy(export_file, copyfile)
                     print("made this copy:   ", copyfile.resolve())
                     self.copy_count += 1
+        # Restore: remove duplicates, reselect originals
+        for obj, dup in original_curves:
+            bpy.data.objects.remove(dup, do_unlink=True)
+            obj.select_set(True)
 
 
 '''
